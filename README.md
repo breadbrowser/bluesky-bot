@@ -1,1 +1,1 @@
-this create a bot for bluesky using the openai api
+this creates a bot for bluesky using the openai api

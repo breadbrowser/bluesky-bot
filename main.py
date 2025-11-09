@@ -53,7 +53,7 @@ handle_name = 'handle-here'
 app_password = 'app_password-here'
 
 
-open_client = OpenAI(base_url="http://127.0.0.1:1235/v1", api_key="nothing")
+open_client = OpenAI(base_url="http://127.0.0.1:1235/v1", api_key="nothing") ## you must likely want to change this btw
 
 client.login(handle_name, app_password)
 

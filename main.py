@@ -5,8 +5,8 @@ from atproto import Client, models, AtUri
 from time import sleep
 import sqlite3
 import os
+from atproto_client.exceptions import InvokeTimeoutError
 
-# Initialize database
 DB_PATH = "notifications.db"
 
 def init_database():
@@ -52,7 +52,8 @@ client = Client()
 handle_name = 'handle-here'
 app_password = 'app_password-here'
 
-open_client = OpenAI(base_url="http://127.0.0.1:1234/v1", api_key="nothing")
+
+open_client = OpenAI(base_url="http://127.0.0.1:1235/v1", api_key="nothing")
 
 client.login(handle_name, app_password)
 
@@ -77,91 +78,150 @@ def text_of_parent_post(thread_post):
 
 def get_chat_start(text, text2, text3):
     chat = [
-        {"role": "system", "content": f"You are a helpful assistant (you better not say user thinks). Be concise and share your opinion. the post above the user is asking about: '{text3}'."},
+        {"role": "system", "content": f"You are a helpful assistant (you better not say user thinks). make everything you write be very short, one paragraph or less, don't mainsplain. the post above the user is asking about: '{text3}'."},
         {"role": "user", "content": str(text).replace(('@' + handle_name), '')},
     ]
     return chat
 
+def get_chat_reply(text, text2, text3):
+    chat = [
+        {"role": "system", "content": f"You are a helpful assistant (you better not say user thinks). make everything you write be very short, one paragraph or less, don't mainsplain."},
+        {"role": "assistant", "content": str(text3) },
+        {"role": "user", "content": str(text).replace(('@' + handle_name), '')},
+    ]
+    return chat
+    
 def get_chat_start_without_context(text):
     chat = [
-        {"role": "system", "content": f"You are a helpful assistant (you better not say user thinks)."},
+        {"role": "system", "content": f"You are a helpful assistant (you better not say user thinks). make everything you write be very short, one paragraph or less. don't mainsplain"},
         {"role": "user", "content": str(text).replace(('@' + handle_name), '')},
     ]
     return chat
-
-while True:
-    last_seen_at = client.get_current_time_iso()
-
-    responses = client.app.bsky.notification.list_notifications()
-    for notification in responses.notifications:
-        if notification.reason in ['mention','reply']:
-            # Check if we've already replied using CID (database check)
-            if has_replied_to_cid(notification.cid):
-                print(f"Already replied to CID (database): {notification.cid}")
-                continue
-            
-            thread_post = client.get_post_thread(notification.uri)
-
-            def get_name_of_user() -> str:
-                """
-                Gets the of the user name.
-                """
-                names = name_of_user(thread_post)
-                return names
-
-            def get_text_of_parent_post() -> str:
-                """
-                Gets the text in the parent post.
-                """
-                text = text_of_parent_post(thread_post)
-                return text
-
-            # Also check using the existing reply checking method
-            didnt_reply = check_replies(thread_post, handle_name)
-            
-            if didnt_reply is True:
-                chat_template = None
-                if notification.reason == 'reply':
-                    chat_template = get_chat_start_without_context(
-                        notification.record.text,
-                    )
-                else:
-                    chat_template = get_chat_start(
-                        notification.record.text,
-                        get_name_of_user(),
-                        get_text_of_parent_post()
-                    )
-                response = open_client.responses.create(
-                    model="granite-4.0-micro",
-                    input=chat_template,
-                    store=False,
-                )
-                root_post_ref = models.create_strong_ref(thread_post.thread.parent.post)
-                reply_to_root = models.create_strong_ref(
-                    client.get_post(
-                        post_rkey=AtUri.from_str(notification.uri).rkey,
-                        cid=notification.cid,
-                        profile_identify=notification.author.did
-                    )
-                )
-                responsef = response.output_text
-                client.send_post(
-                    text=responsef[0:300],
-                    reply_to=models.AppBskyFeedPost.ReplyRef(parent=reply_to_root, root=root_post_ref),
-                )
-                
-                # Save the CID to database after successful reply
-                save_replied_cid(notification.cid, notification.uri)
-                
-                print(f"Response sent: {response.output_text}")
-                print(f"Didn't reply (thread check): {didnt_reply}")
+    
+def get_chat_thread_history(og_uri,current_prompt):
+    chat = [{"role": "system", "content": f"You are a helpful assistant (you better not say user thinks). make everything you write be very short, one paragraph or less. don't mainsplain"},{"role": "user", "content": "test"}]
+    uri=None
+    not_done=True
+    count=1
+    while not_done is True:
+            the_role=None
+            if count % 2 == 0:
+                the_role="user"
             else:
-                print(f"Did reply (thread check): {not didnt_reply}")
-                # Even if we found our reply in the thread, save the CID to database
-                save_replied_cid(notification.cid, notification.uri)
-                continue
-
-    client.app.bsky.notification.update_seen({'seen_at': last_seen_at})
-    print('Processed notifications')
-
-    sleep(5)
+                the_role="system"
+            thread_post=None
+            if count == 1:
+                thread_post = client.get_post_thread(og_uri)
+                uri=thread_post.thread.parent.post.uri
+            else:
+                thread_post = client.get_post_thread(uri)
+                print(chat)
+                #print(thread_post.thread.post.record.reply.parent.uri)
+                try:
+                	uri=thread_post.thread.post.record.reply.parent.uri
+                	print(uri)
+                except:
+                	#print("break")
+                	break
+            try:
+            	text=thread_post.thread.parent.post.record.text
+            except:
+            	text=thread_post.thread.replies[0].post.record.text
+            chat.insert(1,{"role": the_role, "content": text})
+            count=count+1
+            
+    #print("out of loop")
+    chat.pop(1)
+    chat.pop()
+    chat.append({"role": "user", "content": current_prompt})
+    #print("final: "+str(chat))
+    return chat
+    
+def main():
+    client.login(handle_name, app_password)
+    while True:
+        try:
+            last_seen_at = client.get_current_time_iso()
+    
+            responses = client.app.bsky.notification.list_notifications()
+            for notification in responses.notifications:
+                if notification.reason in ['mention','reply']:
+                    if has_replied_to_cid(notification.cid):
+                        #print(f"Already replied to CID (database): {notification.cid}")
+                        continue
+                    
+                    thread_post = client.get_post_thread(notification.uri)
+                    above_post=thread_post.thread.parent.post.record.text
+                    
+    
+                    def get_name_of_user() -> str:
+                        """
+                        Gets the of the user name.
+                        """
+                        names = name_of_user(thread_post)
+                        return names
+    
+                    def get_text_of_parent_post() -> str:
+                        """
+                        Gets the text in the parent post.
+                        """
+                        text = text_of_parent_post(thread_post)
+                        return text
+    
+                    # Also check using the existing reply checking method
+                    didnt_reply = check_replies(thread_post, handle_name)
+                    
+                    if didnt_reply is True:
+                        chat_template = None
+                        if notification.reason == 'reply':
+                            chat_template = get_chat_thread_history(
+                                notification.uri,
+                                notification.record.text,
+                            )
+                        else:
+                            chat_template = get_chat_start(
+                                notification.record.text,
+                                get_name_of_user(),
+                                get_text_of_parent_post()
+                            )
+                        response = open_client.responses.create(
+                            model="granite-4.0-h-tiny",
+                            input=chat_template,
+                            store=False,
+                        )
+                        root_post_ref = models.create_strong_ref(thread_post.thread.parent.post)
+                        reply_to_root = models.create_strong_ref(
+                            client.get_post(
+                                post_rkey=AtUri.from_str(notification.uri).rkey,
+                                cid=notification.cid,
+                                profile_identify=notification.author.did
+                            )
+                        )
+                        responsef = response.output_text
+                        client.send_post(
+                            text=responsef[0:300],
+                            reply_to=models.AppBskyFeedPost.ReplyRef(parent=reply_to_root, root=root_post_ref),
+                        )
+                        
+                        # Save the CID to database after successful reply
+                        save_replied_cid(notification.cid, notification.uri)
+                        
+                        #print(f"Response sent: {response.output_text}")
+                        #print(f"Didn't reply (thread check): {didnt_reply}")
+                    else:
+                        #print(f"Did reply (thread check): {not didnt_reply}")
+                        # Even if we found our reply in the thread, save the CID to database
+                        save_replied_cid(notification.cid, notification.uri)
+                        continue
+    
+            client.app.bsky.notification.update_seen({'seen_at': last_seen_at})
+            print('Processed notifications')
+    
+            sleep(5)
+        except InvokeTimeoutError:
+            client.login(handle_name, app_password)
+            continue
+    
+if __name__ == "__main__":
+    main()
+    sleep(90)
